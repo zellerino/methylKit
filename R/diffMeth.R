@@ -361,106 +361,21 @@ estimatePhi<-function(counts,modelMat,treatment){
 }
 
 # A FASTER VERSION OF FISHERs EXACT
-fast.fisher<-function (x, y = NULL, workspace = 2e+05, hybrid = FALSE, control = list(), 
-                       or = 1, alternative = "two.sided", conf.int = TRUE, conf.level = 0.95, 
-                       simulate.p.value = FALSE, B = 2000, cache=F) 
-{
-  if (nrow(x)!=2 | ncol(x)!=2) stop("Incorrect input format for fast.fisher")
-  #if (cache) {
-  #  key = paste(x,collapse="_")
-  # cachedResult = hashTable[[key]]
-  #  if (!is.null(cachedResult)) {
-  #    return(cachedResult)
-  #  }
-  #}
-  # ---- START: cut version of fisher.test ----
-  DNAME <- deparse(substitute(x))
-  METHOD <- "Fisher's Exact Test for Count Data"
-  nr <- nrow(x)
-  nc <- ncol(x)
-  PVAL <- NULL
-  if ((nr == 2) && (nc == 2)) {
-    m <- sum(x[, 1])
-    n <- sum(x[, 2])
-    k <- sum(x[1, ])
-    x <- x[1, 1]
-    lo <- max(0, k - n)
-    hi <- min(k, m)
-    NVAL <- or
-    names(NVAL) <- "odds ratio"
-    support <- lo:hi
-    logdc <- dhyper(support, m, n, k, log = TRUE)
-    dnhyper <- function(ncp) {
-      d <- logdc + log(ncp) * support
-      d <- exp(d - max(d))
-      d/sum(d)
-    }
-    mnhyper <- function(ncp) {
-      if (ncp == 0) 
-        return(lo)
-      if (ncp == Inf) 
-        return(hi)
-      sum(support * dnhyper(ncp))
-    }
-    pnhyper <- function(q, ncp = 1, upper.tail = FALSE) {
-      if (ncp == 1) {
-        if (upper.tail) 
-          return(phyper(x - 1, m, n, k, lower.tail = FALSE))
-        else return(phyper(x, m, n, k))
-      }
-      if (ncp == 0) {
-        if (upper.tail) 
-          return(as.numeric(q <= lo))
-        else return(as.numeric(q >= lo))
-      }
-      if (ncp == Inf) {
-        if (upper.tail) 
-          return(as.numeric(q <= hi))
-        else return(as.numeric(q >= hi))
-      }
-      d <- dnhyper(ncp)
-      if (upper.tail) 
-        sum(d[support >= q])
-      else sum(d[support <= q])
-    }
-    if (is.null(PVAL)) {
-      PVAL <- switch(alternative, less = pnhyper(x, or), 
-                     greater = pnhyper(x, or, upper.tail = TRUE), 
-                     two.sided = {
-                       if (or == 0) 
-                         as.numeric(x == lo)
-                       else if (or == Inf) 
-                         as.numeric(x == hi)
-                       else {
-                         relErr <- 1 + 10^(-7)
-                         d <- dnhyper(or)
-                         sum(d[d <= d[x - lo + 1] * relErr])
-                       }
-                     })
-      RVAL <- list(p.value = PVAL)
-    }
-    mle <- function(x) {
-      if (x == lo) 
-        return(0)
-      if (x == hi) 
-        return(Inf)
-      mu <- mnhyper(1)
-      if (mu > x) 
-        uniroot(function(t) mnhyper(t) - x, c(0, 1))$root
-      else if (mu < x) 
-        1/uniroot(function(t) mnhyper(1/t) - x, c(.Machine$double.eps, 
-                                                  1))$root
-      else 1
-    }
-    ESTIMATE <- mle(x)
-    #names(ESTIMATE) <- "odds ratio"
-    RVAL <- c(RVAL, estimate = ESTIMATE, null.value = NVAL)
-  }
-  RVAL <- c(RVAL, alternative = alternative, method = METHOD, data.name = DNAME)
-  attr(RVAL, "class") <- "htest"
-  # ---- END: cut version of fisher.test ----    
-  #if (cache) hashTable[[key]] <<- RVAL # write to global variable
-  return(RVAL)                                                                         
+fast.fisher <- function (cntg_table) {
+
+q <-  cntg_table[1,1] # first field in 4 X 4 contigency table 
+m <- cntg_table[1,1] + cntg_table[2,1] # sum of first column in contingency table
+n <-  cntg_table[1,2] + cntg_table[2,2] # sum of second column in contingency table 
+k <- cntg_table[1,1] + cntg_table[1,2] # sum of first row in contingency table
+
+pval_right <- phyper(q = q, m = m, n = n, k = k, lower.tail = FALSE) + (0.5 * dhyper(q,  m, n, k)) # test on the right side 
+                      
+
+pval_left <- phyper(q = q-1 , m = m, n = n, k = k, lower.tail = TRUE) + (0.5 * dhyper(q,  m, n, k)) # test on the left side
+                                                               
+ 
+return (ifelse(test = pval_right > pval_left, yes = pval_left * 2, no = pval_right * 2 )) # pvalue of twosided test with mid-pval
+
 }
 
 
@@ -746,17 +661,19 @@ setMethod("calculateDiffMeth", "methylBase",
           stop("Too many covariates/too few replicates.")}}
         
         # get count matrix and make list
-        cntlist=split(as.matrix(subst[,c(Ccols,Tcols)]),1:nrow(subst))
+       # cntlist=split(as.matrix(subst[,c(Ccols,Tcols)]),1:nrow(subst))
+	cnt_matrix <- as.matrix(subst[, c(Ccols, Tcols)])
+	un_cnt <- mgcv::uniquecombs(cnt_matrix)	
 
       if(length(.Object@treatment)==2 )
       {
-          fpval=unlist( mclapply( cntlist,
-                            function(x) fast.fisher(matrix(as.numeric( x) ,
-                                                           ncol=2,byrow=F),
-                                                    conf.int = F)$p.value,
-                            mc.cores=mc.cores,mc.preschedule = TRUE) ) 
-          
-          # set1 is the high, set2 is the low level of the group 
+         # fpval=unlist( mclapply( cntlist,
+         #                   function(x) fast.fisher(matrix( x,
+         #                                                  ncol=2, nrow =2)),
+         #                   mc.cores=mc.cores,mc.preschedule = TRUE)) 
+        fpval <- apply(X = un_cnt, MARGIN = 1,FUN = function(x)fast.fisher(matrix(x, nrow = 2, ncol = 2))) 
+        fpval <- fpval[attr(un_cnt, "index")] 
+	 # set1 is the high, set2 is the low level of the group 
           set1.Cs=.Object@numCs.index[.Object@treatment==levels(as.factor(.Object@treatment))[2]]
           set2.Cs=.Object@numCs.index[.Object@treatment==levels(as.factor(.Object@treatment))[1]]
           
@@ -764,8 +681,9 @@ setMethod("calculateDiffMeth", "methylBase",
           mom.meth1    = 100*(subst[,set1.Cs]/subst[,set1.Cs-1]) # get % methylation
           mom.meth2    = 100*(subst[,set2.Cs]/subst[,set2.Cs-1])
           # get difference between percent methylations
-          mom.mean.diff=mom.meth1-mom.meth2 
-          x=data.frame(subst[,1:4],fpval,
+          mom.mean.diff=mom.meth1-mom.meth2
+	  subst= data.table::as.data.table(subst)  
+          x=data.table::data.table(subst[,1:4],fpval,
                      p.adjusted(fpval,method=adjust),
                      meth.diff=mom.mean.diff,stringsAsFactors=FALSE)
           colnames(x)[5:7] <- c("pvalue","qvalue","meth.diff")
